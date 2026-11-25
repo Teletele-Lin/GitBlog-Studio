@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>My Blog</title>
+    <meta name="description" content="记录学习、实践与思考。">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f8fafc">
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+    <!-- 固定依赖版本，避免 CDN 自动升级影响页面。 -->
+    <link id="theme-light" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify-themeable@0.9.0/dist/css/theme-simple.css">
+    <link id="theme-dark" rel="stylesheet" media="not all" href="https://cdn.jsdelivr.net/npm/docsify-themeable@0.9.0/dist/css/theme-simple-dark.css">
+    <link rel="stylesheet" href="assets/typography.css">
+    <link rel="stylesheet" href="assets/custom.css">
+    <script src="assets/theme.js"></script>
+</head>
+<body>
+    <a class="skip-link" href="#main">跳到正文</a>
+    <header class="site-header">
+        <div class="header-inner">
+            <a class="site-brand" href="#/" aria-label="博客首页"><strong id="blog-brand">Blog</strong><span>.</span></a>
+            <div class="section-nav" id="topic-nav" role="navigation" aria-label="专题导航">
+                <a href="#/" data-section="root">全部专题</a>
+                <a href="admin/index.html" target="_blank" rel="noopener noreferrer">内容管理</a>
+            </div>
+            <div class="header-actions">
+                <button id="search-open" class="search-open" type="button" aria-label="打开全文搜索" disabled>
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"/><path d="m16 16 5 5" stroke="currentColor" stroke-width="1.7"/></svg>
+                    <span>搜索文章</span><kbd>/</kbd>
+                </button>
+                <button class="theme-toggle" id="theme-toggle" type="button" aria-label="切换到深色模式">深色模式</button>
+            </div>
+        </div>
+    </header>
+    <dialog id="search-dialog" class="search-dialog" aria-labelledby="search-title">
+        <div class="search-dialog-heading"><h2 id="search-title">搜索全部文章</h2><button id="search-close" type="button">关闭</button></div>
+        <p class="search-hint">搜索所有专题的标题与正文</p>
+        <div id="search-mount"></div>
+    </dialog>
+    <!-- 搜索插件的独立索引容器，不受 Docsify 移除侧边栏的时序影响。 -->
+    <aside id="search-index" hidden aria-hidden="true"><div class="sidebar-nav"></div></aside>
+    <div id="app">加载中…</div>
+    <noscript>请启用 JavaScript 阅读博客。</noscript>
+    <script src="assets/catalog.js"></script>
+    <script src="assets/navigation.js"></script>
+    <script>
+        window.$docsify = {
+            name: '',
+            basePath: new URL('.', document.baseURI).href,
+            loadSidebar: false,
+            hideSidebar: true,
+            loadNavbar: false,
+            coverpage: false,
+            auto2top: true,
+            maxLevel: 4,
+            subMaxLevel: 0,
+            mergeNavbar: false,
+            nativeEmoji: true,
+            markdown: {
+                renderer: {
+                    image: function (href, title, text) {
+                        // Root-relative Markdown paths are relative to this blog,
+                        // including project sites hosted below /repository/.
+                        if (/^\/(?!\/)/.test(href)) href = new URL(href.slice(1), new URL('.', document.baseURI)).href;
+                        return this.origin.image(href, title, text);
+                    }
+                }
+            },
+            themeable: { readyTransition: false, responsiveTables: true },
+            search: {
+                maxAge: 86400000,
+                paths: 'auto',
+                placeholder: '搜索标题与正文',
+                noData: '没有找到相关内容，换个关键词试试。',
+                depth: 4,
+                namespace: 'blog-cms-' + window.location.pathname
+            },
+            copyCode: { buttonText: '复制', successText: '已复制', errorText: '复制失败' },
+            plugins: [window.TeleteleUI.install]
+        };
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/docsify@4.13.1/lib/docsify.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/docsify-themeable@0.9.0/dist/js/docsify-themeable.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/components/prism-c.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/components/prism-cpp.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/components/prism-sql.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/components/prism-bash.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/components/prism-python.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/components/prism-rust.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/components/prism-json.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/docsify@4.13.1/lib/plugins/zoom-image.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/docsify@4.13.1/lib/plugins/search.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/docsify-copy-code@3.0.2/dist/docsify-copy-code.min.js"></script>
+</body>
+</html>

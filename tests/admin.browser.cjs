@@ -1,0 +1,277 @@
+// Integration test in Chromium, with every GitHub API request mocked.
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const http = require('node:http');
+const { chromium } = require('playwright-core');
+const { MockGit, fixture, mockRepository: exampleRepository } = require('./admin-mock.cjs');
+const mockRepository = { ...exampleRepository, branch: 'main' };
+const C = require('../docs/admin/core.js');
+const root = path.resolve(__dirname, '../docs');
+const catalogPath = 'docs/assets/catalog.json';
+const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j5o8AAAAASUVORK5CYII=', 'base64');
+const cors = {
+    'access-control-allow-origin': '*',
+    'access-control-allow-headers': 'authorization,content-type,accept,x-github-api-version',
+    'access-control-allow-methods': 'GET,POST,PATCH,OPTIONS',
+    'content-type': 'application/json'
+};
+
+test('self-hosted admin: articles, publishing, clipboard images, topics and conflict handling', async () => {
+    const server = http.createServer(async (req, res) => {
+        try {
+            const url = new URL(req.url, 'http://localhost');
+            const requested = decodeURIComponent(url.pathname);
+            const relative = requested.startsWith('/project-blog/') ? requested.slice('/project-blog'.length) : requested;
+            const file = path.resolve(root, '.' + relative);
+            if (!file.startsWith(root + path.sep)) { res.writeHead(404); return res.end(); }
+            const bytes = await fs.readFile(file);
+            res.writeHead(200, { 'Content-Type': mime[path.extname(file)] || 'application/octet-stream' });
+            res.end(bytes);
+        } catch { res.writeHead(404); res.end(); }
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    let browser;
+    const mock = new MockGit(fixture(), mockRepository);
+    const initialCatalog = JSON.parse(mock.text(catalogPath));
+    const firstArticle = initialCatalog.articles[0];
+    const newArticle = C.directoryFolder(initialCatalog.directories[0]) + '/测试新文章.md';
+    const newRoute = C.articleRoute(newArticle);
+    try {
+        browser = await chromium.launch({ executablePath: process.env.CHROMIUM_EXECUTABLE || undefined, headless: true });
+        const context = await browser.newContext({ viewport: { width: 1920, height: 1080 }, permissions: ['clipboard-read', 'clipboard-write'] });
+        await context.route('https://api.github.com/**', async route => {
+            const request = route.request();
+            if (request.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
+            assert.equal(request.headers().authorization, 'Bearer mock-token');
+            const [status, body] = mock.handle(request.url(), request.method(), request.postData() ? request.postDataJSON() : undefined);
+            return route.fulfill({ status, headers: cors, body: JSON.stringify(body) });
+        });
+        await context.route('https://raw.githubusercontent.com/**', route => route.fulfill({ status: 200, contentType: 'image/png', body: png }));
+        const page = await context.newPage();
+        const errors = [];
+        page.on('pageerror', error => errors.push(error.message));
+        page.on('console', message => {
+            if (message.type() === 'error' && /content security policy/i.test(message.text())) errors.push(message.text());
+        });
+        page.on('dialog', dialog => dialog.accept());
+        const url = 'http://127.0.0.1:' + server.address().port + '/project-blog/admin/index.html';
+        await page.goto(url);
+        await page.locator('#repository-owner').fill(mockRepository.owner);
+        await page.locator('#repository-name').fill(mockRepository.repo);
+        await page.locator('#repository-branch').fill(mockRepository.branch);
+        await page.locator('#token').fill('mock-token');
+        await page.locator('#connect').click();
+        await page.locator('#workspace').waitFor({ state: 'visible' });
+        await page.locator('#busy-indicator').waitFor({ state: 'hidden' });
+        const initialFiles = [...mock.currentTree().keys()];
+        assert.equal(await page.locator('#article-count').textContent(), String(initialFiles.filter(p => /^docs\/blogs\/.+\.md$/.test(p) && !p.endsWith('/overview.md')).length));
+        assert.equal(await page.locator('#media-count').textContent(), String(initialFiles.filter(p => /^docs\/assets\/uploads\/.+\.(png|jpe?g|webp|gif|avif)$/i.test(p)).length));
+        assert.equal(await page.locator('#token').inputValue(), '');
+        assert.equal(await page.evaluate(() => Object.values(localStorage).some(v => v.includes('mock-token')) || Object.values(sessionStorage).some(v => v.includes('mock-token'))), false);
+        await page.locator('#article-list button').filter({ hasText: firstArticle.title }).click();
+        await page.locator('#article-form').waitFor({ state: 'visible' });
+        assert.equal(await page.locator('#article-title').inputValue(), firstArticle.title);
+        assert.equal(await page.locator('#article-body').inputValue(), C.extractArticle(mock.text(C.articleFile(firstArticle.path))).body);
+        assert.match(await page.locator('#article-dates').textContent(), /创建于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
+        assert.equal(await page.locator('#article-author').getAttribute('placeholder'), initialCatalog.site.author);
+        const typography = await page.evaluate(() => {
+            const style = selector => getComputedStyle(document.querySelector(selector));
+            return {
+                body: style('body').fontFamily, preview: style('#article-preview').fontFamily,
+                input: style('#article-description').fontFamily, inputWeight: style('#article-description').fontWeight,
+                source: style('#article-editor .CodeMirror').fontFamily, code: style('#uploaded-markdown').fontFamily,
+                previewSize: style('#article-preview').fontSize
+            };
+        });
+        assert.equal(typography.body, typography.preview);
+        assert.equal(typography.body, typography.input);
+        assert.equal(typography.inputWeight, '400');
+        assert.equal(typography.source, typography.code);
+        assert.equal(typography.previewSize, '16px');
+        assert.ok(await page.locator('#workspace').evaluate(node => node.getBoundingClientRect().width >= 1900));
+        assert.equal(await page.locator('#article-metadata').evaluate(node => node.open), false);
+        async function fillEditor(type, value) {
+            await page.locator('#' + type + '-editor .CodeMirror').evaluate((node, text) => node.CodeMirror.setValue(text), value);
+        }
+        async function focusEditorEnd(type) {
+            await page.locator('#' + type + '-editor .CodeMirror').evaluate(node => {
+                const cm = node.CodeMirror;
+                cm.focus(); cm.setCursor(cm.posFromIndex(cm.getValue().length));
+            });
+        }
+        async function openMetadata() {
+            if (!(await page.locator('#article-metadata').evaluate(node => node.open))) await page.locator('#article-metadata summary').click();
+        }
+        await page.locator('#toggle-article-list').click();
+        assert.equal(await page.locator('#article-layout').evaluate(node => node.classList.contains('list-collapsed')), true);
+        await page.locator('#toggle-article-list').click();
+
+        await page.clock.setFixedTime(new Date('2026-11-26T01:20:59Z'));
+        await page.locator('#new-article').click();
+        await page.locator('#article-title').fill('测试新文章');
+        await page.locator('#article-description').fill('测试摘要');
+        await fillEditor('article', '# 测试标题\n\n**正文**\n\n<script>window.evil=1</script>');
+        await page.locator('#article-preview strong').waitFor();
+        assert.equal(await page.evaluate(() => window.evil), undefined);
+        assert.equal(await page.locator('#article-preview script').count(), 0);
+        await openMetadata();
+        await page.locator('#article-featured').check();
+        // The Markdown workspace can cover the full viewport, switch modes,
+        // and publish without leaving fullscreen.
+        await page.locator('[data-open-editor=article]').click();
+        assert.equal(await page.locator('#article-writing').evaluate(node => node.classList.contains('is-fullscreen')), true);
+        const dimensions = await page.locator('#article-writing').boundingBox();
+        assert.ok(dimensions.width >= 1910 && dimensions.height >= 1070);
+        await page.locator('#article-writing [data-editor=preview]').click();
+        assert.equal(await page.locator('#article-editor .studio-source').isVisible(), false);
+        assert.equal(await page.locator('#article-preview').isVisible(), true);
+        await page.locator('#article-writing [data-editor=source]').click();
+        assert.equal(await page.locator('#article-preview').isVisible(), false);
+        await page.locator('#article-writing [data-editor=split]').click();
+        assert.equal(await page.locator('#article-preview').isVisible(), true);
+        // Test editing commands on a selected text range (and undo preserves the source).
+        const beforeFormat = await page.locator('#article-body').inputValue();
+        await page.locator('#article-editor .CodeMirror').evaluate(node => node.CodeMirror.setSelection({line: 0, ch: 2}, {line: 0, ch: 6}));
+        await page.locator('#article-writing [data-format=toggleItalic]').click();
+        assert.notEqual(await page.locator('#article-body').inputValue(), beforeFormat);
+        await page.locator('#article-writing [data-format=undo]').click();
+        assert.equal(await page.locator('#article-body').inputValue(), beforeFormat);
+        await focusEditorEnd('article');
+        await page.keyboard.insertText(' keyboard test');
+        assert.match(await page.locator('#article-body').inputValue(), / keyboard test$/);
+        await page.locator('#article-writing [data-format=undo]').click();
+        assert.equal(await page.locator('#article-body').inputValue(), beforeFormat);
+        await page.locator('#article-writing .studio-save').click();
+        await page.locator('#busy-indicator').waitFor({ state: 'hidden' });
+        assert.equal(await page.locator('#article-writing').evaluate(node => node.classList.contains('is-fullscreen')), true);
+        await page.keyboard.press('Escape');
+        assert.equal(await page.locator('#article-writing').evaluate(node => node.classList.contains('is-fullscreen')), false);
+        const article = newArticle;
+        assert.ok(mock.currentTree().has(article));
+        assert.match(mock.text(article), /title: "测试新文章"/);
+        assert.ok(JSON.parse(mock.text(catalogPath)).featured.includes(newRoute));
+        assert.equal(mock.requests.filter(r => r.method === 'PATCH').length, 1);
+        const getArticle = () => JSON.parse(mock.text(catalogPath)).articles.find(a => a.path === newRoute);
+        assert.equal(getArticle().createdAt, '2026-11-26T01:20Z');
+        assert.equal(getArticle().updatedAt, '2026-11-26T01:20Z');
+        assert.equal(Object.hasOwn(getArticle(), 'author'), false);
+        assert.match(await page.locator('#article-dates').textContent(), /2026-11-26 09:20/);
+        await page.clock.setFixedTime(new Date('2026-11-26T01:23:51Z'));
+        await page.locator('#article-author').fill('Guest');
+        await page.locator('#article-description').fill('修改卡片摘要');
+        await page.locator('#article-author').focus();
+        await page.keyboard.press('Control+s');
+        await page.locator('#busy-indicator').waitFor({ state: 'hidden' });
+        assert.equal(getArticle().author, 'Guest');
+        assert.equal(getArticle().updatedAt, '2026-11-26T01:20Z');
+        if (process.env.CMS_SCREENSHOT_DIR) await page.screenshot({ path: process.env.CMS_SCREENSHOT_DIR + '/article.png', fullPage: true });
+
+        await page.locator('[data-view=media]').click();
+        await page.locator('#media-grid').waitFor();
+        async function paste(selector) {
+            await page.evaluate(({ selector, base64 }) => {
+                const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+                const data = new DataTransfer();
+                data.items.add(new File([bytes], 'clipboard.png', { type: 'image/png' }));
+                document.querySelector(selector).dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+            }, { selector, base64: png.toString('base64') });
+            await page.locator('#busy-indicator').waitFor({ state: 'hidden' });
+        }
+        const oldImages = new Set(mock.currentTree().keys());
+        await paste('#dropzone');
+        const image = [...mock.currentTree().keys()].find(p => !oldImages.has(p));
+        assert.match(image, /^docs\/assets\/uploads\/.+\.png$/);
+        assert.deepEqual(mock.blobs.get(mock.currentTree().get(image).sha), png);
+        const markdown = C.markdownImage(mockRepository, image);
+        assert.equal(await page.locator('#uploaded-markdown').inputValue(), markdown);
+        await page.locator('#copy-uploaded').click();
+        assert.equal(await page.evaluate(() => navigator.clipboard.readText()), markdown);
+        const card = page.locator('.media-card').filter({ hasText: path.basename(image) });
+        await card.getByRole('button', { name: '复制 Markdown', exact: true }).click();
+        assert.equal(await page.evaluate(() => navigator.clipboard.readText()), markdown);
+        if (process.env.CMS_SCREENSHOT_DIR) await page.screenshot({ path: process.env.CMS_SCREENSHOT_DIR + '/media.png', fullPage: true });
+
+        await page.locator('[data-view=articles]').click();
+        await page.locator('#article-list button').filter({ hasText: '测试新文章' }).click();
+        await page.locator('#article-form').waitFor({ state: 'visible' });
+        await page.clock.setFixedTime(new Date('2026-11-26T01:24:27Z'));
+        await focusEditorEnd('article');
+        await page.keyboard.press('Control+Shift+f');
+        assert.equal(await page.locator('#article-writing').evaluate(node => node.classList.contains('is-fullscreen')), true);
+        await paste('#article-editor .CodeMirror textarea');
+        const inserted = await page.locator('#article-body').inputValue();
+        assert.match(inserted, /!\[.+\.png\]\(https:\/\/raw\.githubusercontent\.com\//);
+        await page.keyboard.press('Escape');
+        await openMetadata();
+        await page.locator('#pick-article-cover').click();
+        await page.locator('#asset-dialog .asset-choice').first().click();
+        assert.match(await page.locator('#article-cover-image').inputValue(), /^\/assets\/uploads\//);
+        await page.locator('#article-form button[type=submit]').click();
+        await page.locator('#busy-indicator').waitFor({ state: 'hidden' });
+        assert.match(mock.text(article), /raw\.githubusercontent\.com/);
+        assert.equal(getArticle().createdAt, '2026-11-26T01:20Z');
+        assert.equal(getArticle().updatedAt, '2026-11-26T01:24Z');
+        assert.equal(getArticle().author, 'Guest');
+
+        await page.locator('[data-view=topics]').click();
+        await page.locator('#new-topic').click();
+        await page.locator('#topic-title').fill('新专题');
+        await page.locator('#topic-id').fill('new-topic');
+        await page.locator('#topic-description').fill('简介');
+        await fillEditor('topic', '# 新专题\n\n');
+        await focusEditorEnd('topic');
+        await paste('#topic-editor .CodeMirror textarea');
+        assert.match(await page.locator('#topic-body').inputValue(), /raw\.githubusercontent\.com/);
+        await page.locator('#topic-form button[type=submit]').click();
+        await page.locator('#busy-indicator').waitFor({ state: 'hidden' });
+        assert.match(mock.text('docs/blogs/new-topic/overview.md'), /data-catalog="new-topic"/);
+        assert.ok(JSON.parse(mock.text(catalogPath)).directories.some(d => d.id === 'new-topic'));
+        assert.equal(await page.locator('#topic-editor .CodeMirror').isVisible(), true);
+
+        await page.locator('[data-view=home]').click();
+        await page.locator('#home-form').waitFor({ state: 'visible' });
+        await page.locator('#site-name').fill('My Example Blog');
+        await page.locator('#site-brand').fill('Example');
+        await page.locator('#site-author').fill('Alice');
+        await page.locator('#site-hero-title').fill('Welcome to the blog');
+        await fillEditor('home', (await page.locator('#home-body').inputValue()) + '\nCMS test\n');
+        await page.locator('#home-form button[type=submit]').click();
+        await page.locator('#busy-indicator').waitFor({ state: 'hidden' });
+        assert.match(mock.text('docs/README.md'), /CMS test/);
+        const settings = JSON.parse(mock.text(catalogPath)).site;
+        assert.equal(settings.name, 'My Example Blog');
+        assert.equal(settings.author, 'Alice');
+        assert.equal(settings.heroTitle, 'Welcome to the blog');
+        assert.deepEqual(settings.github, mockRepository);
+        assert.equal(await page.locator('#studio-brand').textContent(), 'Example');
+        assert.ok(mock.requests.some(r => r.method === 'PATCH' && r.route === '/git/refs/heads/main'));
+        const commits = mock.requests.filter(r => r.method === 'POST' && r.route === '/git/commits');
+        assert.ok(commits.length > 0);
+        assert.ok(commits.every(r => r.body.message.startsWith('[CMS] ')));
+
+        await page.locator('[data-view=articles]').click();
+        await page.locator('#article-list button').filter({ hasText: '测试新文章' }).click();
+        await page.locator('#article-form').waitFor({ state: 'visible' });
+        await page.locator('#article-title').fill('未发布的新标题');
+        mock.externalCommit(); const external = mock.head;
+        await page.locator('#article-form button[type=submit]').click();
+        await page.locator('#notice').filter({ hasText: '已有新提交' }).waitFor();
+        assert.equal(mock.head, external);
+        assert.equal(await page.locator('#article-title').inputValue(), '未发布的新标题');
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.locator('[data-open-editor=article]').click();
+        const mobile = await page.locator('#article-writing').boundingBox();
+        assert.ok(mobile.width >= 389 && mobile.width <= 391 && mobile.height >= 843);
+        await page.locator('#article-writing [data-editor=source]').click();
+        assert.equal(await page.locator('#article-editor .CodeMirror').isVisible(), true);
+        await page.locator('#article-fullscreen').click();
+        assert.deepEqual(errors, []);
+        await context.close();
+    } finally {
+        if (browser) await browser.close();
+        await new Promise(resolve => server.close(resolve));
+    }
+});
